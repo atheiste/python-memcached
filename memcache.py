@@ -58,10 +58,11 @@ import time
 import zlib
 
 import six
+from six import StringIO
 
 
 def cmemcache_hash(key):
-    return ((((binascii.crc32(key.encode('ascii')) & 0xffffffff) >> 16) & 0x7fff) or 1)
+    return ((((binascii.crc32(key) & 0xffffffff) >> 16) & 0x7fff) or 1)
 serverHashFunction = cmemcache_hash
 
 
@@ -224,7 +225,7 @@ class Client(threading.local):
             self.server_max_value_length = SERVER_MAX_VALUE_LENGTH
 
         #  figure out the pickler style
-        file = io.StringIO()
+        file = StringIO()
         try:
             pickler = self.pickler(file, protocol=self.pickleProtocol)
             self.picklerIsKeyword = True
@@ -366,7 +367,7 @@ class Client(threading.local):
             if server.connect():
                 # print("(using server %s)" % server,)
                 return server, key
-            serverhash = serverHashFunction(str(serverhash) + str(i))
+            serverhash = serverHashFunction(six.b(serverhash) + six.b(str(i)))
         return None, None
 
     def disconnect_all(self):
@@ -429,7 +430,7 @@ class Client(threading.local):
         for server in dead_servers:
             del server_keys[server]
 
-        for server, keys in server_keys.iteritems():
+        for server, keys in six.iteritems(server_keys):
             try:
                 for key in keys:
                     server.expect("DELETED")
@@ -482,7 +483,7 @@ class Client(threading.local):
                 return 1
             self.debuglog('%s expected %s, got: %s'
                     % (cmd, ' or '.join(expected), repr(line)))
-        except socket.error, msg:
+        except socket.error as msg:
             if isinstance(msg, tuple):
                 msg = msg[1]
             server.mark_dead(msg)
@@ -663,9 +664,11 @@ class Client(threading.local):
         -> original key.
         """
         # Check it just once ...
-        key_extra_len = len(key_prefix)
         if key_prefix and self.do_check_key:
-            self.check_key(key_prefix)
+            key_prefix = self.check_key(key_prefix)
+        else:
+            key_prefix = six.b(key_prefix)
+        key_extra_len = len(key_prefix)
 
         # server (_Host) -> list of unprefixed server keys in mapping
         server_keys = {}
@@ -677,7 +680,7 @@ class Client(threading.local):
                 # Tuple of hashvalue, key ala _get_server(). Caller is
                 # essentially telling us what server to stuff this on.
                 # Ensure call to _get_server gets a Tuple as well.
-                str_orig_key = str(orig_key[1])
+                str_orig_key = six.b(orig_key[1])
 
                 # Gotta pre-mangle key before hashing to a
                 # server. Returns the mangled key.
@@ -685,7 +688,7 @@ class Client(threading.local):
                     (orig_key[0], key_prefix + str_orig_key))
             else:
                 # set_multi supports int / long keys.
-                str_orig_key = str(orig_key)
+                str_orig_key = six.b(orig_key)
                 server, key = self._get_server(key_prefix + str_orig_key)
 
             # Now check to make sure key length is proper ...
@@ -785,7 +788,7 @@ class Client(threading.local):
                                      store_info[2]))
                     else:
                         notstored.append(prefixed_to_orig_key[key])
-                server.send_cmds(''.join(bigcmd))
+                server.send_cmds(six.b(''.join(bigcmd)))
             except socket.error as msg:
                 if isinstance(msg, tuple):
                     msg = msg[1]
@@ -798,7 +801,7 @@ class Client(threading.local):
 
         #  short-circuit if there are no servers, just return all keys
         if not server_keys:
-            return(mapping.keys())
+            return(list(mapping.keys()))
 
         for server, keys in six.iteritems(server_keys):
             try:
@@ -823,19 +826,17 @@ class Client(threading.local):
         flags = 0
         if isinstance(val, str):
             pass
-        elif isinstance(val, int):
-            flags |= Client._FLAG_INTEGER
-            val = "%d" % val
-            # force no attempt to compress this silly string.
-            min_compress_len = 0
-        elif isinstance(val, long):
-            flags |= Client._FLAG_LONG
+        elif isinstance(val, six.integer_types):
+            if six.PY2 and isinstance(val, int):
+                flags |= Client._FLAG_INTEGER  # TODO: check py3
+            else:
+                flags |= Client._FLAG_LONG  # TODO: if PY3 is long or int
             val = "%d" % val
             # force no attempt to compress this silly string.
             min_compress_len = 0
         else:
             flags |= Client._FLAG_PICKLE
-            file = io.StringIO()
+            file = StringIO()
             if self.picklerIsKeyword:
                 pickler = self.pickler(file, protocol=self.pickleProtocol)
             else:
@@ -1109,11 +1110,13 @@ class Client(threading.local):
             val = buf
         elif flags & Client._FLAG_INTEGER:
             val = int(buf)
-        elif flags & Client._FLAG_LONG:
+        elif flags & Client._FLAG_LONG and six.PY3:
+            val = int(buf)
+        elif flags & Client._FLAG_LONG and six.PY2:
             val = long(buf)
         elif flags & Client._FLAG_PICKLE:
             try:
-                file = io.StringIO(buf)
+                file = StringIO(buf)
                 unpickler = self.unpickler(file)
                 if self.persistent_load:
                     unpickler.persistent_load = self.persistent_load
@@ -1141,9 +1144,9 @@ class Client(threading.local):
         if not key:
             raise Client.MemcachedKeyNoneError("Key is None")
         if isinstance(key, six.text_type):
-            key = key.encode('ascii')
+            key = six.b(key)
         if not isinstance(key, six.binary_type):
-            raise Client.MemcachedKeyTypeError("Key must be str()'s")
+            raise Client.MemcachedKeyTypeError("Key must be str/bytes")
 
         if isinstance(key, six.string_types):
             if self.server_max_key_length != 0 and \
@@ -1154,6 +1157,7 @@ class Client(threading.local):
             if not valid_key_chars_re.match(key):
                 raise Client.MemcachedKeyCharacterError(
                     "Control characters not allowed")
+        return key
 
 
 class _Host(object):
@@ -1340,7 +1344,6 @@ if __name__ == "__main__":
     print("Testing docstrings...")
     _doctest()
     print("Running tests:")
-    print
     serverList = [["127.0.0.1:11211"]]
     if '--do-unix' in sys.argv:
         serverList.append([os.path.join(os.getcwd(), 'memcached.socket')])
@@ -1349,7 +1352,7 @@ if __name__ == "__main__":
         mc = Client(servers, debug=1)
 
         def to_s(val):
-            if not isinstance(val, basestring):
+            if not isinstance(val, six.string_types):
                 return "%s (%s)" % (val, type(val))
             return "%s" % val
 
@@ -1381,15 +1384,28 @@ if __name__ == "__main__":
 
         test_setget("a_string", "some random string")
         test_setget("an_integer", 42)
-        if test_setget("long", long(1 << 30)):
+        if six.PY2 and test_setget("PY2long", long(1 << 30)):
             print("Testing delete ...",)
-            if mc.delete("long"):
+            if mc.delete("PY2long"):
                 print("OK")
             else:
                 print("FAIL")
                 failures = failures + 1
             print("Checking results of delete ...")
-            if mc.get("long") is None:
+            if mc.get("PY2long") is None:
+                print("OK")
+            else:
+                print("FAIL")
+                failures = failures + 1
+        if six.PY3 and test_setget("PY3long", int(1 << 30)):
+            print("Testing delete ...",)
+            if mc.delete("PY3long"):
+                print("OK")
+            else:
+                print("FAIL")
+                failures = failures + 1
+            print("Checking results of delete ...")
+            if mc.get("PY3long") is None:
                 print("OK")
             else:
                 print("FAIL")
@@ -1457,14 +1473,14 @@ if __name__ == "__main__":
 
         print("Testing sending a unicode-string key...",)
         try:
-            x = mc.set(unicode('keyhere'), 1)
+            x = mc.set(u'keyhere', 1)
         except Client.MemcachedStringEncodingError as msg:
             print("OK",)
         else:
             failures = failures + 1
             print("FAIL")
         try:
-            x = mc.set((unicode('a') * SERVER_MAX_KEY_LENGTH)
+            x = mc.set((u'a' * SERVER_MAX_KEY_LENGTH)
                        .encode('utf-8'), 1)
         except Exception:
             failures = failures + 1
